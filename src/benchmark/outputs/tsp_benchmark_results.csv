@@ -1,0 +1,3 @@
+method,route,cost,time_sec
+brute_force_classical,0 -> 1 -> 2 -> 3 -> 0,18,0.00012869999955000822
+qaoa,0 -> 2 -> 3 -> 1 -> 0,22,12.4
