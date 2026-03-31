@@ -1,4 +1,6 @@
+import itertools
 import sys
+import time
 from pathlib import Path
 
 
@@ -57,9 +59,10 @@ def greedy_vrp(instance: VRPInstance) -> Dict:
             current = nearest
             unvisited.remove(nearest)
 
-        # Return to depot
+        # Return to depot (only add cost if vehicle actually left the depot)
         route.append(instance.depot)
-        total_cost += G[current][instance.depot].get("weight", 0)
+        if current != instance.depot:
+            total_cost += G[current][instance.depot].get("weight", 0)
         routes[vehicle_key] = route
 
     return {
@@ -67,6 +70,84 @@ def greedy_vrp(instance: VRPInstance) -> Dict:
         "total_cost": round(total_cost, 4),
         "method": "greedy_nearest_neighbour",
         "unserved": unvisited,
+    }
+
+
+def brute_force_vrp(instance: VRPInstance) -> Dict:
+    """
+    Exhaustive brute-force VRP solver.
+
+    Strategy:
+      - Enumerate ALL permutations of customers.
+      - For each permutation, greedily split into n_vehicles routes
+        (fill each vehicle until capacity is exceeded, then start next one).
+      - Track the split assignment that yields the minimum total travel cost.
+      - Depot (node 0) is always start/end of every route.
+
+    Complexity: O((n-1)!) — only feasible for n_customers <= 7.
+    """
+    G = instance.graph
+    customers = [n for n in G.nodes if n != instance.depot]
+
+    best_cost = float("inf")
+    best_routes: Dict = {}
+
+    t0 = time.perf_counter()
+
+    for perm in itertools.permutations(customers):
+        # Split permutation into vehicle routes respecting capacity
+        routes: Dict[str, List[int]] = {}
+        vehicle_idx = 0
+        load = 0
+        route: List[int] = [instance.depot]
+        total_cost = 0.0
+        feasible = True
+
+        for customer in perm:
+            demand = instance.demands[customer]
+            if vehicle_idx >= instance.n_vehicles:
+                feasible = False
+                break
+            if load + demand > instance.capacity:
+                # Close current vehicle route
+                route.append(instance.depot)
+                total_cost += G[route[-2]][instance.depot].get("weight", 0)
+                routes[f"vehicle_{vehicle_idx + 1}"] = route
+                vehicle_idx += 1
+                if vehicle_idx >= instance.n_vehicles:
+                    feasible = False
+                    break
+                route = [instance.depot]
+                load = 0
+            prev = route[-1]
+            total_cost += G[prev][customer].get("weight", 0)
+            route.append(customer)
+            load += demand
+
+        if not feasible:
+            continue
+
+        # Close last vehicle route
+        route.append(instance.depot)
+        total_cost += G[route[-2]][instance.depot].get("weight", 0)
+        routes[f"vehicle_{vehicle_idx + 1}"] = route
+
+        # Pad remaining vehicles with empty depot→depot routes
+        for v in range(vehicle_idx + 2, instance.n_vehicles + 1):
+            routes[f"vehicle_{v}"] = [instance.depot, instance.depot]
+
+        if total_cost < best_cost:
+            best_cost = total_cost
+            best_routes = {k: list(v) for k, v in routes.items()}
+
+    elapsed = time.perf_counter() - t0
+
+    return {
+        "routes": best_routes,
+        "total_cost": round(best_cost, 4),
+        "method": "brute_force",
+        "runtime_s": round(elapsed, 6),
+        "unserved": [],
     }
 
 
@@ -141,7 +222,20 @@ def draw_vrp_routes(
 
 
 if __name__ == "__main__":
-    instance = build_vrp_instance(n_customers=5, n_vehicles=2, capacity=10)
-    result = greedy_vrp(instance)
-    print_result(result, instance)
-    draw_vrp_routes(instance, result)
+    instance = build_vrp_instance(n_customers=4, n_vehicles=2, capacity=10)
+
+    print("\n--- Greedy Nearest-Neighbour ---")
+    result_greedy = greedy_vrp(instance)
+    print_result(result_greedy, instance)
+
+    print("\n--- Brute Force ---")
+    result_bf = brute_force_vrp(instance)
+    for veh, route in result_bf["routes"].items():
+        c = route_cost(instance.graph, route)
+        load = sum(instance.demands[n] for n in route if n != instance.depot)
+        print(f"  {veh}: {' -> '.join(map(str, route))}")
+        print(f"           cost={round(c, 4)}  load={load}/{instance.capacity}")
+    print(f"  Total cost : {result_bf['total_cost']}")
+    print(f"  Runtime    : {result_bf['runtime_s']}s")
+
+    draw_vrp_routes(instance, result_bf, filename="vrp_brute_force_routes.png")
