@@ -38,7 +38,27 @@ from qiskit_aer.noise import NoiseModel, depolarizing_error
 
 # ── Project imports ──────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.core.vrp_graph import VRPInstance, build_vrp_instance
+from src.core.vrp_graph import VRPInstance, analyze_vrp_instance, build_vrp_instance
+
+
+def _empty_qaoa_result(
+    method_name: str,
+    backend: str,
+    runtime: float,
+    p: int,
+    depot: int,
+) -> dict:
+    return {
+        "routes": {"vehicle_1": [depot, depot], "vehicle_2": [depot, depot]},
+        "best_cost": 0.0,
+        "runtime_s": round(runtime, 4),
+        "backend": backend,
+        "method": method_name,
+        "bitstring": "",
+        "p": p,
+        "feasible": True,
+        "status": "ok",
+    }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1.  QUBO Construction
@@ -398,7 +418,10 @@ def _best_assignment(
             # We return the purely penalized cost so the UI reflects the infeasibility 
             # if no valid route was ever found by the quantum circuit
             final_actual_cost = penalized_cost if penalty > 0 else actual_cost
-            
+    
+    if best_bs is None:
+        raise RuntimeError("QAOA sampling returned no candidate bitstrings")
+
     return best_bs, final_actual_cost
 
 
@@ -472,6 +495,26 @@ def solve_vrp_qaoa(
     np.random.seed(seed)
     t0 = time.perf_counter()
 
+    if p < 1:
+        raise ValueError("QAOA depth p must be at least 1")
+    if shots < 1:
+        raise ValueError("shots must be at least 1")
+    if maxiter < 1:
+        raise ValueError("maxiter must be at least 1")
+
+    analysis = analyze_vrp_instance(vrp_instance)
+    if not analysis["is_valid"]:
+        raise ValueError("Invalid VRP instance: " + "; ".join(analysis["issues"]))
+    if vrp_instance.n_vehicles != 2:
+        raise ValueError(
+            f"QAOA VRP solver currently supports exactly 2 vehicles; got {vrp_instance.n_vehicles}"
+        )
+    if analysis["customers"] and not analysis["is_feasible"]:
+        raise ValueError(
+            "QAOA requires a feasible 2-vehicle instance: "
+            + "; ".join(analysis["infeasible_reasons"])
+        )
+
     # --- Build backend ---
     if noisy:
         noise_model = _build_noise_model(error_rate)
@@ -480,6 +523,15 @@ def solve_vrp_qaoa(
     else:
         sim = AerSimulator()
         method_name = "qaoa_ideal"
+
+    if not analysis["customers"]:
+        return _empty_qaoa_result(
+            method_name=method_name,
+            backend=backend,
+            runtime=time.perf_counter() - t0,
+            p=p,
+            depot=vrp_instance.depot,
+        )
 
     # --- Build QUBO ---
     Q, customers = _build_qubo(vrp_instance)
@@ -511,12 +563,14 @@ def solve_vrp_qaoa(
 
     return {
         "routes": decoded["routes"],
-        "best_cost": best_cost,
+        "best_cost": float(best_cost),
         "runtime_s": round(runtime, 4),
         "backend": backend,
         "method": method_name,
         "bitstring": best_bs,
         "p": p,
+        "feasible": True,
+        "status": "ok",
     }
 
 

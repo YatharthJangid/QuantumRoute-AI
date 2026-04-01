@@ -1,18 +1,17 @@
 """
-interactive_runner.py — Interactive single-instance runner
+interactive_runner.py - Interactive single-instance runner
 ==========================================================
 Run a custom VRP instance by answering interactive prompts.
 """
 
 import sys
-import time
 from pathlib import Path
 
-# Add project root to sys.path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.core.vrp_graph import build_vrp_instance, validate_vrp
-from src.core.vrp_classical import brute_force_vrp, greedy_vrp
+from src.core.vrp_graph import analyze_vrp_instance, build_vrp_instance, validate_vrp
+from src.core.vrp_classical import brute_force_vrp, clarke_wright_vrp, greedy_vrp
 from src.core.qaoa_solver import solve_vrp_qaoa
 
 
@@ -30,34 +29,49 @@ def prompt_bool(message: str, default: bool) -> bool:
     val = input(f"{message} ({def_str}): ").strip().lower()
     if not val:
         return default
-    return val in ['y', 'yes', 'true', '1']
+    return val in ["y", "yes", "true", "1"]
+
+
+def _print_solver_result(name: str, result: dict) -> None:
+    print(f"  Cost    : {result.get('best_cost', result.get('total_cost'))}")
+    print(f"  Time    : {result.get('runtime_s', '?')}s")
+    if "feasible" in result:
+        print(f"  Feasible: {result['feasible']}")
+    if result.get("status"):
+        print(f"  Status  : {result['status']}")
+    for veh, route in result.get("routes", {}).items():
+        print(f"    {veh}: {' -> '.join(map(str, route))}")
+    if result.get("unserved"):
+        print(f"    Unserved: {result['unserved']}")
 
 
 def main():
     print("=" * 60)
-    print("  QuantumRoute-AI — Interactive Benchmark Runner")
+    print("  QuantumRoute-AI - Interactive Benchmark Runner")
     print("=" * 60)
     print("Enter parameters for your VRP run, or press Enter to keep defaults.\n")
 
-    # 1. Gather parameters
     n_customers = prompt_int("Number of customers (n)", 5)
     n_vehicles = prompt_int("Number of vehicles", 2)
     capacity = prompt_int("Vehicle capacity", 30)
 
-    # Note on classical brute force scaling (O((n-1)!))
     if n_customers > 9:
-        print(f"\n⚠️  WARNING: n={n_customers} will take a VERY long time for Brute Force!")
-        print("    Brute force scales as O((n-1)!).")
-        print("    n=8 takes  ~0.2 s")
-        print("    n=10 takes ~20 s")
-        print("    n=11 takes ~3 minutes")
-        print("    n=12 takes ~30 minutes\n")
+        print(f"\nWARNING: n={n_customers} will take a very long time for brute force.")
+        print("  Brute force scales as O((n-1)!).")
+        print("  n=8 takes  ~0.2 s")
+        print("  n=10 takes ~20 s")
+        print("  n=11 takes ~3 minutes")
+        print("  n=12 takes ~30 minutes\n")
 
     run_bf = prompt_bool("Run Brute Force (Exact Classical)?", default=(n_customers <= 9))
     run_greedy = prompt_bool("Run Greedy (Heuristic Classical)?", default=True)
-    run_qaoa = prompt_bool("Run QAOA (Quantum Simulator)?", default=True)
+    run_clarke_wright = prompt_bool("Run Clarke-Wright Savings?", default=True)
+    qaoa_default = n_vehicles == 2
+    run_qaoa = prompt_bool(
+        "Run QAOA (Quantum Simulator, 2 vehicles only)?",
+        default=qaoa_default,
+    )
 
-    # QAOA params if requested
     qaoa_p = 1
     qaoa_maxiter = 30
     if run_qaoa:
@@ -65,67 +79,64 @@ def main():
         qaoa_p = prompt_int("  QAOA Circuit Depth (p)", 1)
         qaoa_maxiter = prompt_int("  QAOA Max Iterations (COBYLA)", 30)
 
-    # 2. Build Instance
-    print("\n" + "─" * 60)
+    print("\n" + "-" * 60)
     print(f"Building VRP instance with {n_customers} customers...")
     instance = build_vrp_instance(
         n_customers=n_customers,
         n_vehicles=n_vehicles,
         capacity=capacity,
-        seed=42
+        seed=42,
     )
-    validate_vrp(instance)
-    print("─" * 60)
+    analysis = validate_vrp(instance)
+    print("-" * 60)
 
-    # 3. Run selected solvers
     results = {}
 
     if run_greedy:
-        print("\n⚙️  Running Greedy Nearest-Neighbour...")
-        t0 = time.perf_counter()
+        print("\nRunning Greedy Nearest-Neighbour...")
         res_greedy = greedy_vrp(instance)
-        elapsed = time.perf_counter() - t0
-        print(f"  Cost: {res_greedy['total_cost']}")
-        print(f"  Time: {elapsed:.6f}s")
-        results['Greedy'] = (res_greedy['total_cost'], elapsed)
+        _print_solver_result("Greedy", res_greedy)
+        results["Greedy"] = res_greedy.get("total_cost")
+
+    if run_clarke_wright:
+        print("\nRunning Clarke-Wright Savings...")
+        res_cw = clarke_wright_vrp(instance)
+        _print_solver_result("Clarke-Wright", res_cw)
+        results["Clarke-Wright"] = res_cw.get("total_cost")
 
     if run_bf:
-        print("\n⚙️  Running Classical Brute Force... (this might take a while)")
-        t0 = time.perf_counter()
+        print("\nRunning Classical Brute Force... (this might take a while)")
         res_bf = brute_force_vrp(instance)
-        elapsed = time.perf_counter() - t0
-        print(f"  Cost: {res_bf['total_cost']}")
-        print(f"  Time: {elapsed:.6f}s")
-        for veh, route in res_bf['routes'].items():
-            print(f"    {veh}: {' -> '.join(map(str, route))}")
-        results['Brute Force'] = (res_bf['total_cost'], elapsed)
+        _print_solver_result("Brute Force", res_bf)
+        results["Brute Force"] = res_bf.get("total_cost")
 
     if run_qaoa:
-        print(f"\n⚛️  Running QAOA Simulator (p={qaoa_p}, maxiter={qaoa_maxiter})...")
-        print("     (Simulating quantum circuits... please wait)")
-        t0 = time.perf_counter()
-        res_qaoa = solve_vrp_qaoa(
-            instance,
-            p=qaoa_p,
-            backend='aer_simulator',
-            shots=1024,
-            maxiter=qaoa_maxiter
-        )
-        elapsed = time.perf_counter() - t0
-        # Print a newline to prevent overlap from qaoa output logs
-        print(f"\n  Cost: {res_qaoa['best_cost']}")
-        print(f"  Time: {elapsed:.6f}s")
-        for veh, route in res_qaoa['routes'].items():
-            print(f"    {veh}: {' -> '.join(map(str, route))}")
-        results['QAOA'] = (res_qaoa['best_cost'], elapsed)
+        if n_vehicles != 2:
+            print("\nSkipping QAOA: the current implementation supports exactly 2 vehicles.")
+        elif not analysis["is_feasible"]:
+            print(
+                "\nSkipping QAOA: the instance is infeasible for the declared fleet. "
+                + "; ".join(analysis["infeasible_reasons"])
+            )
+        else:
+            print(f"\nRunning QAOA Simulator (p={qaoa_p}, maxiter={qaoa_maxiter})...")
+            print("  Simulating quantum circuits... please wait")
+            res_qaoa = solve_vrp_qaoa(
+                instance,
+                p=qaoa_p,
+                backend="aer_simulator",
+                shots=1024,
+                maxiter=qaoa_maxiter,
+            )
+            _print_solver_result("QAOA", res_qaoa)
+            results["QAOA"] = res_qaoa.get("best_cost")
 
-    # 4. Summary
     print("\n" + "=" * 60)
-    print(f"  🏁 SUMMARY FOR n={n_customers} ")
+    print(f"  SUMMARY FOR n={n_customers}")
     print("=" * 60)
     if results:
-        for solver, (cost, t) in results.items():
-            print(f"  {solver:<15} |  Cost: {cost:<8.2f} |  Runtime: {t:.4f}s")
+        for solver, cost in results.items():
+            print(f"  {solver:<15} | Cost: {cost}")
     else:
         print("  No solvers were run.")
     print("=" * 60)
